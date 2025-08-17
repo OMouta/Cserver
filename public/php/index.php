@@ -28,6 +28,12 @@ function parse_ini_size($val) {
 
 $showFull = isset($_GET['full']) && $_GET['full'] === '1';
 
+// Serve raw phpinfo in a standalone document when requested so its CSS doesn't leak.
+if (isset($_GET['raw_phpinfo']) && $_GET['raw_phpinfo'] === '1') {
+    phpinfo();
+    exit;
+}
+
 // Collect basic info
 $info = [
     'PHP Version' => phpversion(),
@@ -67,22 +73,15 @@ $server = [
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>PHP Installation Details</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 24px; color: #111; background: #f7f7fb; }
-    h1 { margin-bottom: 8px; }
-    .wrap { max-width: 1000px; margin: 0 auto; }
-    table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
-    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #eee; font-size: 14px; }
-    th { width: 280px; background: #fafafa; color: #333; font-weight: 600; }
-    pre { margin: 6px 0; padding: 8px; background:#f3f4f6; border-radius:4px; overflow:auto; }
-    .actions { margin: 12px 0; }
-    a.button { display:inline-block; padding:8px 12px; background:#0b5fff; color:#fff; text-decoration:none; border-radius:6px; font-size:14px; }
-    .small { font-size: 13px; color:#666; }
-    ul.ext { columns: 3; -webkit-columns:3; -moz-columns:3; list-style: none; padding-left: 0; margin:0; }
-    ul.ext li { padding: 3px 0; }
-</style>
+    <title>PHP Installation Details</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="../../css/app.css">
+    <style>
+        .wrap { max-width: 1000px; margin: 0 auto; }
+        .actions { margin: 12px 0; }
+        a.button { display:inline-block; padding:8px 12px; background:#0b5fff; color:#fff; text-decoration:none; border-radius:6px; font-size:14px; }
+        .small { font-size: 13px; color:#666; }
+    </style>
 </head>
 <body>
 <div class="wrap">
@@ -116,7 +115,13 @@ $server = [
         <?php foreach ($server as $k => $v): ?>
             <tr>
                 <th><?= htmlspecialchars($k) ?></th>
-                <td><?= htmlspecialchars($v) ?></td>
+                <td>
+                    <?php if (is_array($v)): ?>
+                        <pre><?= htmlspecialchars(print_r($v, true)) ?></pre>
+                    <?php else: ?>
+                        <?= htmlspecialchars((string)$v) ?>
+                    <?php endif; ?>
+                </td>
             </tr>
         <?php endforeach; ?>
         </tbody>
@@ -125,9 +130,10 @@ $server = [
     <?php if ($showFull): ?>
         <h2 style="margin-top:18px;">Full phpinfo()</h2>
         <div style="background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 2px rgba(0,0,0,.04);">
-            <?php phpinfo(); ?>
+            <iframe src="?raw_phpinfo=1" title="phpinfo" style="width:100%;min-height:600px;border:0;"></iframe>
         </div>
     <?php endif; ?>
+
 </div>
 </body>
 </html>

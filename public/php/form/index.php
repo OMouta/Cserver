@@ -35,6 +35,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
   <meta charset="utf-8">
   <title>Form</title>
+  <link rel="stylesheet" href="../../../css/app.css">
 </head>
 <body>
   <h1>Submit form</h1>

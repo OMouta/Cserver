@@ -44,7 +44,8 @@ int run_cgi_command(SOCKET client, const char *interpreter_cmd, const char *scri
     si.hStdOutput = hChildStdoutWr;
     si.hStdError = hChildStdoutWr;
 
-    _snprintf_s(cmdline, sizeof(cmdline), _TRUNCATE, "%s \"%s\"", interpreter_cmd, script_path);
+    /* Quote the interpreter path to handle spaces/apostrophes in the path (e.g. D:\IDE's\...) */
+    _snprintf_s(cmdline, sizeof(cmdline), _TRUNCATE, "\"%s\" \"%s\"", interpreter_cmd, script_path);
 
     // Build environment block
     LPCH curenv = GetEnvironmentStringsA();
@@ -74,7 +75,18 @@ int run_cgi_command(SOCKET client, const char *interpreter_cmd, const char *scri
         }
     }
 
-    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, envblock, NULL, &si, &pi)) goto err2;
+    /* Use the script's directory as the child working directory so interpreters (php-cgi) can resolve relative paths. */
+    char child_cwd[MAX_PATH] = {0};
+    const char *slash = strrchr(script_path, '\\');
+    if (!slash) slash = strrchr(script_path, '/');
+    if (slash) {
+        size_t dlen = (size_t)(slash - script_path);
+        if (dlen < sizeof(child_cwd)) {
+            memcpy(child_cwd, script_path, dlen);
+            child_cwd[dlen] = '\0';
+        }
+    }
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, envblock, child_cwd[0] ? child_cwd : NULL, &si, &pi)) goto err2;
 
     CloseHandle(hChildStdoutWr);
     CloseHandle(hChildStdinRd);

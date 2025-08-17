@@ -185,7 +185,11 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
 
     /* use the canonicalized path for file operations */
     strncpy(filepath, fullpath, sizeof(filepath)-1); filepath[sizeof(filepath)-1] = '\0';
-    /* If the path is a directory, try to resolve an index file (index.php then index.html). */
+    /* If the path is a directory, try to resolve an index file (index.php then index.html).
+       If we resolved an index file but the original request URL did not include a trailing slash,
+       send a 301 redirect to the URL with a trailing slash so relative URLs (like "view.php")
+       resolve correctly in the browser. */
+    int index_appended = 0;
     {
         DWORD attrs = GetFileAttributesA(filepath);
         if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -201,6 +205,7 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
                     if (dl > 0 && decoded[dl-1] == '/') strncat(decoded, "index.php", sizeof(decoded)-dl-1);
                     else strncat(decoded, "/index.php", sizeof(decoded)-dl-1);
                 }
+                index_appended = 1;
             } else {
                 /* try index.html */
                 snprintf(candidate, sizeof(candidate), "%s\\index.html", filepath);
@@ -211,8 +216,42 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
                         if (dl > 0 && decoded[dl-1] == '/') strncat(decoded, "index.html", sizeof(decoded)-dl-1);
                         else strncat(decoded, "/index.html", sizeof(decoded)-dl-1);
                     }
+                    index_appended = 1;
                 }
             }
+        }
+    }
+
+    /* If we appended an index file but the original URL didn't end with '/', redirect to the
+       URL with a trailing slash so relative redirects in scripts work (e.g. "view.php"). */
+    if (index_appended) {
+        size_t ol = strlen(original_url);
+        /* strip query portion when checking trailing slash; original_url may include ?query */
+        char ori_copy[1024]; snprintf(ori_copy, sizeof(ori_copy), "%s", original_url);
+        char *q = strchr(ori_copy, '?'); if (q) *q = '\0';
+        if (ol > 0 && ori_copy[ strlen(ori_copy) > 0 ? strlen(ori_copy)-1 : 0 ] != '/') {
+            /* build location: original_url with a trailing slash inserted before query (if any) */
+            char location[2048]; if (q) {
+                /* original_url has query: split and insert slash before ? */
+                size_t pathlen = (size_t)(q - ori_copy);
+                snprintf(location, sizeof(location), "%.*s/%s", (int)pathlen, ori_copy, q + 1);
+            } else {
+                snprintf(location, sizeof(location), "%s/", ori_copy);
+            }
+            /* If original_url had a query, ensure the ?query suffix is preserved */
+            if (strchr(original_url, '?')) {
+                char *orig_q = strchr(original_url, '?');
+                /* append ?query */
+                size_t llen = strlen(location);
+                if (llen + 1 + strlen(orig_q+1) < sizeof(location)) {
+                    strcat(location, "?"); strcat(location, orig_q+1);
+                }
+            }
+            char resp[512]; int r = snprintf(resp, sizeof(resp), "HTTP/1.1 301 Moved Permanently\r\nLocation: %s\r\nConnection: close\r\n\r\n", location);
+            send(client, resp, r, 0);
+            shutdown(client, SD_SEND); closesocket(client);
+            if (out_status) *out_status = 301;
+            return 0;
         }
     }
     long total_sent = 0; int status = 200;
