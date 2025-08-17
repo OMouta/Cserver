@@ -46,17 +46,7 @@ static void add_thread_handle(HANDLE h) {
     LeaveCriticalSection(&g_handles_lock);
 }
 
-static QueueNode *dequeue_node(void) {
-    QueueNode *n = NULL;
-    EnterCriticalSection(&g_queue_lock);
-    if (g_queue_head) {
-        n = g_queue_head;
-        g_queue_head = n->next;
-        if (!g_queue_head) g_queue_tail = NULL;
-    }
-    LeaveCriticalSection(&g_queue_lock);
-    return n;
-}
+/* dequeue_node removed (inlined in worker_thread) to avoid unused-function warning */
 
 
 static long handle_client_wrapper(SOCKET client, const struct sockaddr_in *addr) {
@@ -68,9 +58,22 @@ static long handle_client_wrapper(SOCKET client, const struct sockaddr_in *addr)
 static DWORD WINAPI worker_thread(LPVOID lpParam) {
     (void)lpParam;
     while (state_is_running()) {
-        QueueNode *n = dequeue_node();
+        QueueNode *n = NULL;
+        /* Wait for work while holding the queue lock to use SleepConditionVariableCS correctly. */
+        EnterCriticalSection(&g_queue_lock);
+        while (g_queue_head == NULL && state_is_running()) {
+            /* Wait until a producer enqueues or shutdown is signaled. */
+            SleepConditionVariableCS(&g_queue_cond, &g_queue_lock, INFINITE);
+        }
+        if (g_queue_head) {
+            n = g_queue_head;
+            g_queue_head = n->next;
+            if (!g_queue_head) g_queue_tail = NULL;
+        }
+        LeaveCriticalSection(&g_queue_lock);
+
         if (!n) {
-            SleepConditionVariableCS(&g_queue_cond, &g_queue_lock, 1000);
+            /* either shutting down or spurious wake */
             continue;
         }
         (void)handle_client_wrapper(n->client, &n->addr);

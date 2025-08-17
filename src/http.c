@@ -19,7 +19,7 @@ void http_set_serve_dir(const char *d) { g_serve_dir = d ? d : "public"; }
 static void url_decode_internal(char *dst, const char *src) {
     char a, b;
     while (*src) {
-        if ((*src == '%') && ((a = src[1]) && (b = src[2])) && isxdigit(a) && isxdigit(b)) {
+        if ((*src == '%') && ((a = src[1]) && (b = src[2])) && isxdigit((unsigned char)a) && isxdigit((unsigned char)b)) {
             char hex[3] = {a, b, '\0'};
             *dst++ = (char)strtol(hex, NULL, 16);
             src += 3;
@@ -34,6 +34,29 @@ static void url_decode_internal(char *dst, const char *src) {
 }
 
 void url_decode(char *dst, const char *src) { url_decode_internal(dst, src); }
+
+/* Bounded URL decode: returns 0 on success, 1 if output would overflow. */
+static int url_decode_n(char *dst, size_t dstlen, const char *src) {
+    size_t wi = 0;
+    while (*src) {
+        if ((*src == '%') && src[1] && src[2] && isxdigit((unsigned char)src[1]) && isxdigit((unsigned char)src[2])) {
+            if (wi + 1 >= dstlen) return 1;
+            char hex[3] = { (char)src[1], (char)src[2], '\0' };
+            dst[wi++] = (char)strtol(hex, NULL, 16);
+            src += 3;
+        } else if (*src == '+') {
+            if (wi + 1 >= dstlen) return 1;
+            dst[wi++] = ' ';
+            src++;
+        } else {
+            if (wi + 1 >= dstlen) return 1;
+            dst[wi++] = *src++;
+        }
+    }
+    if (wi >= dstlen) return 1;
+    dst[wi] = '\0';
+    return 0;
+}
 
 const char *get_mime_type(const char *path) {
     const char *ext = strrchr(path, '.');
@@ -54,18 +77,51 @@ const char *get_mime_type(const char *path) {
 
 long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_status) {
     char buffer[8192];
-    int received = recv(client, buffer, sizeof(buffer) - 1, 0);
-    if (received <= 0) {
-        closesocket(client);
-        if (out_status) *out_status = 0;
-        return -1;
+    int received = 0;
+    int total = 0;
+    /* Set a receive timeout so we don't block indefinitely waiting for a client. */
+    {
+        DWORD timeout_ms = 5000; /* 5 seconds */
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
     }
-    buffer[received] = '\0';
+
+    /* Read until end of headers (\r\n\r\n) or buffer full. */
+    while (total < (int)sizeof(buffer) - 1) {
+        received = recv(client, buffer + total, (int)sizeof(buffer) - 1 - total, 0);
+        if (received <= 0) {
+            closesocket(client);
+            if (out_status) *out_status = 0;
+            return -1;
+        }
+        total += received;
+        buffer[total] = '\0';
+        if (strstr(buffer, "\r\n\r\n") != NULL) break;
+        /* continue reading until headers end or buffer limit */
+    }
+    /* If we exited the loop without finding headers terminator, treat as too large */
+    if (strstr(buffer, "\r\n\r\n") == NULL) {
+        const char *too_large = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n";
+        send(client, too_large, (int)strlen(too_large), 0);
+        shutdown(client, SD_SEND);
+        closesocket(client);
+        if (out_status) *out_status = 431;
+        return 0;
+    }
+    /* Optionally clear timeout (socket will be closed later) */
     char method[16] = {0};
     char url[1024] = {0};
     sscanf(buffer, "%15s %1023s", method, url);
     char *q = strchr(url, '?'); if (q) *q = '\0';
-    char decoded[1024]; url_decode(decoded, url);
+    /* Safe URL decode into bounded buffer */
+    char decoded[1024];
+    if (url_decode_n(decoded, sizeof(decoded), url) != 0) {
+        const char *too_long = "HTTP/1.1 414 Request-URI Too Long\r\nConnection: close\r\n\r\n";
+        send(client, too_long, (int)strlen(too_long), 0);
+        shutdown(client, SD_SEND);
+        closesocket(client);
+        if (out_status) *out_status = 414;
+        return 0;
+    }
     if (strcmp(decoded, "/") == 0) strcpy(decoded, "/index.html");
     if (strstr(decoded, "..") != NULL) {
         const char *forbidden = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
@@ -76,7 +132,41 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
         return 0;
     }
     char filepath[MAX_PATH];
-    snprintf(filepath, sizeof(filepath), "%s%s", g_serve_dir, decoded);
+    /* build the raw path then canonicalize it */
+    char pathbuf[MAX_PATH];
+    snprintf(pathbuf, sizeof(pathbuf), "%s%s", g_serve_dir, decoded);
+    char full_serve[MAX_PATH]; char fullpath[MAX_PATH];
+    if (!_fullpath(full_serve, g_serve_dir, sizeof(full_serve))) {
+        /* fallback: use g_serve_dir as-is */
+        strncpy(full_serve, g_serve_dir, sizeof(full_serve)-1); full_serve[sizeof(full_serve)-1] = '\0';
+    }
+    /* ensure trailing backslash for prefix check */
+    {
+        size_t sl = strlen(full_serve);
+        if (sl > 0 && full_serve[sl-1] != '\\' && full_serve[sl-1] != '/') {
+            if (sl + 1 < sizeof(full_serve)) { full_serve[sl] = '\\'; full_serve[sl+1] = '\0'; }
+        }
+    }
+    if (!_fullpath(fullpath, pathbuf, sizeof(fullpath))) {
+        const char *err500 = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n";
+        send(client, err500, (int)strlen(err500), 0);
+        shutdown(client, SD_SEND);
+        closesocket(client);
+        if (out_status) *out_status = 500;
+        return 0;
+    }
+    /* enforce that fullpath is under full_serve directory */
+    if (strncmp(fullpath, full_serve, strlen(full_serve)) != 0) {
+        const char *forbidden = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
+        send(client, forbidden, (int)strlen(forbidden), 0);
+        shutdown(client, SD_SEND);
+        closesocket(client);
+        if (out_status) *out_status = 403;
+        return 0;
+    }
+
+    /* use the canonicalized path for file operations */
+    strncpy(filepath, fullpath, sizeof(filepath)-1); filepath[sizeof(filepath)-1] = '\0';
     long total_sent = 0; int status = 200;
     char referer_buf[201] = "-"; char ua_buf[201] = "-";
     char *headers_end = strstr(buffer, "\r\n\r\n");

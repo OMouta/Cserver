@@ -11,6 +11,7 @@
 
 static FILE *g_log_file = NULL;
 static CRITICAL_SECTION g_log_lock;
+static int g_log_inited = 0; /* guard whether g_log_lock was initialized */
 static char g_log_path[MAX_PATH] = "";
 static unsigned long long g_log_rotate_size = 0;
 static int g_log_rotate_count = 0;
@@ -39,6 +40,7 @@ void log_init(const char *path, unsigned long long rotate_size, int rotate_count
     if (!inited) {
         InitializeCriticalSection(&g_log_lock);
         inited = 1;
+        g_log_inited = 1;
     }
     if (path) {
         // if same path already open, keep it
@@ -104,7 +106,9 @@ void log_shutdown(void) {
         g_log_file = NULL;
         LeaveCriticalSection(&g_log_lock);
     }
-    // delete critical section only if it was initialized
-    // Note: keeping it simple and calling DeleteCriticalSection is safe when init happened
-    DeleteCriticalSection(&g_log_lock);
+    /* delete critical section only if it was initialized */
+    if (g_log_inited) {
+        DeleteCriticalSection(&g_log_lock);
+        g_log_inited = 0;
+    }
 }
