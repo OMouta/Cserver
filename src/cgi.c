@@ -1,0 +1,172 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "cgi.h"
+
+#define CGI_READ_BUF 8192
+
+// Helper to send data to socket; returns 1 on success, 0 on failure
+static int socket_send_all(SOCKET s, const void *buf, size_t len) {
+    const char *p = (const char *)buf;
+    size_t rem = len;
+    while (rem > 0) {
+        int sent = send(s, p, (int)rem, 0);
+        if (sent == SOCKET_ERROR || sent == 0) return 0;
+        p += sent; rem -= sent;
+    }
+    return 1;
+}
+
+int run_cgi_command(SOCKET client, const char *interpreter_cmd, const char *script_path,
+                    const char **env_pairs, const char *body, size_t body_len, int *out_status) {
+    SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+    HANDLE hChildStdinRd = NULL, hChildStdinWr = NULL;
+    HANDLE hChildStdoutRd = NULL, hChildStdoutWr = NULL;
+    PROCESS_INFORMATION pi = {0};
+    STARTUPINFOA si = {0};
+    char cmdline[4096];
+
+    // Create pipes
+    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &sa, 0)) goto err;
+    if (!CreatePipe(&hChildStdinRd, &hChildStdinWr, &sa, 0)) goto err;
+
+    // Ensure the read handle is not inherited by the child
+    SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(hChildStdinWr, HANDLE_FLAG_INHERIT, 0);
+
+    si.cb = sizeof(STARTUPINFOA);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = hChildStdinRd;
+    si.hStdOutput = hChildStdoutWr;
+    si.hStdError = hChildStdoutWr;
+
+    _snprintf_s(cmdline, sizeof(cmdline), _TRUNCATE, "%s \"%s\"", interpreter_cmd, script_path);
+
+    // Build environment block
+    LPCH curenv = GetEnvironmentStringsA();
+    char *envblock = NULL; size_t envblock_len = 0;
+    if (curenv) {
+        LPCH p = curenv;
+        while (!(p[0] == '\0' && p[1] == '\0')) p++;
+        envblock_len = (size_t)(p - curenv) + 2;
+        envblock = (char*)malloc(envblock_len + 1);
+        if (envblock) memcpy(envblock, curenv, envblock_len);
+        FreeEnvironmentStringsA(curenv);
+    }
+    if (env_pairs) {
+        size_t extra = 0;
+        for (const char **e = env_pairs; *e; ++e) extra += strlen(*e) + 1;
+        if (extra > 0) {
+            size_t base = envblock_len > 0 ? envblock_len - 1 : 0;
+            char *newblock = (char*)malloc(base + extra + 2);
+            if (!newblock) goto err;
+            if (envblock) { memcpy(newblock, envblock, base); free(envblock); envblock = NULL; }
+            char *dst = newblock + base;
+            for (const char **e = env_pairs; *e; ++e) {
+                size_t l = strlen(*e);
+                memcpy(dst, *e, l); dst += l; *dst++ = '\0';
+            }
+            *dst++ = '\0'; envblock = newblock; envblock_len = (size_t)(dst - newblock);
+        }
+    }
+
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, envblock, NULL, &si, &pi)) goto err2;
+
+    CloseHandle(hChildStdoutWr);
+    CloseHandle(hChildStdinRd);
+
+    // Write body then close stdin
+    if (body_len > 0 && body != NULL) {
+        DWORD written = 0;
+        WriteFile(hChildStdinWr, body, (DWORD)body_len, &written, NULL);
+    }
+    CloseHandle(hChildStdinWr);
+
+    // Read stdout, parse headers, send response head, then stream body
+    {
+        char buf[CGI_READ_BUF];
+        char hdrbuf[8192]; size_t hdrfill = 0; int headers_sent = 0;
+        DWORD n = 0; BOOL ok;
+        while ((ok = ReadFile(hChildStdoutRd, buf, sizeof(buf), &n, NULL)) && n > 0) {
+            if (!headers_sent) {
+                size_t tocopy = (size_t)n;
+                if (hdrfill + tocopy > sizeof(hdrbuf)) tocopy = sizeof(hdrbuf) - hdrfill;
+                memcpy(hdrbuf + hdrfill, buf, tocopy); hdrfill += tocopy;
+                char *end = NULL;
+                for (size_t i = 0; i + 3 < hdrfill; ++i) {
+                    if (hdrbuf[i] == '\r' && hdrbuf[i+1] == '\n' && hdrbuf[i+2] == '\r' && hdrbuf[i+3] == '\n') { end = hdrbuf + i + 4; break; }
+                }
+                if (!end) {
+                    for (size_t i = 0; i + 1 < hdrfill; ++i) {
+                        if (hdrbuf[i] == '\n' && hdrbuf[i+1] == '\n') { end = hdrbuf + i + 2; break; }
+                    }
+                }
+                if (end) {
+                    size_t hdrlen = (size_t)(end - hdrbuf);
+                    if (hdrlen >= sizeof(hdrbuf)) hdrlen = sizeof(hdrbuf) - 1;
+                    hdrbuf[hdrlen] = '\0';
+                    char *p = hdrbuf;
+                    int status_code = 200; char status_reason[128] = "OK";
+                    char resphead[8192]; size_t resphead_len = 0;
+                    while ((size_t)(p - hdrbuf) < hdrlen) {
+                        char *ln = memchr(p, '\n', (size_t)(&hdrbuf[hdrlen] - p));
+                        size_t linelen = ln ? (size_t)(ln - p) : (size_t)(&hdrbuf[hdrlen] - p);
+                        if (linelen > 0 && p[linelen-1] == '\r') linelen--;
+                        if (linelen == 0) break;
+                        char line[1024]; size_t cl = linelen < sizeof(line)-1 ? linelen : sizeof(line)-1;
+                        memcpy(line, p, cl); line[cl] = '\0';
+                        if (_strnicmp(line, "Status:", 7) == 0) {
+                            char *v = line + 7; while (*v == ' ') v++;
+                            status_code = atoi(v);
+                            char *sp = strchr(v, ' ');
+                            if (sp) { while (*sp == ' ') sp++; strncpy(status_reason, sp, sizeof(status_reason)-1); status_reason[sizeof(status_reason)-1] = '\0'; }
+                        } else {
+                            resphead_len += snprintf(resphead + resphead_len, sizeof(resphead) - resphead_len, "%s\r\n", line);
+                        }
+                        if (!ln) break;
+                        p = ln + 1;
+                    }
+                    char status_line[256]; int slen = snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d%s%s\r\n", status_code,
+                        status_reason[0] ? " " : "", status_reason);
+                    socket_send_all(client, status_line, (size_t)slen);
+                    if (resphead_len > 0) socket_send_all(client, resphead, resphead_len);
+                    socket_send_all(client, "\r\n", 2);
+                    headers_sent = 1;
+                    size_t header_consumed = hdrlen;
+                    size_t body_in_hdr = hdrfill - header_consumed;
+                    if (body_in_hdr > 0) socket_send_all(client, hdrbuf + header_consumed, body_in_hdr);
+                    if (tocopy < (size_t)n) socket_send_all(client, buf + tocopy, (size_t)n - tocopy);
+                } else {
+                    if (hdrfill == sizeof(hdrbuf)) { socket_send_all(client, hdrbuf, hdrfill); hdrfill = 0; headers_sent = 1; }
+                }
+            } else {
+                if (!socket_send_all(client, buf, (size_t)n)) break;
+            }
+        }
+    }
+
+    WaitForSingleObject(pi.hProcess, 5000);
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(pi.hProcess, &exitCode)) if (out_status) *out_status = (int)exitCode;
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hChildStdoutRd);
+    if (envblock) free(envblock);
+    return 0;
+
+err:
+    if (hChildStdoutRd) CloseHandle(hChildStdoutRd);
+    if (hChildStdoutWr) CloseHandle(hChildStdoutWr);
+    if (hChildStdinRd) CloseHandle(hChildStdinRd);
+    if (hChildStdinWr) CloseHandle(hChildStdinWr);
+    return -1;
+
+err2:
+    if (envblock) free(envblock);
+    goto err;
+}

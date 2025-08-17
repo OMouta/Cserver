@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -O2 -Wall
 LDFLAGS = -lws2_32
 SRCS = src/server.c src/http.c src/log.c src/threadpool.c src/state.c src/utils.c
-OUT = server.exe
+OUT = Cserver.exe
 
 all: $(OUT)
 

@@ -11,10 +11,17 @@
 #include "http.h"
 #include "log.h"
 #include "utils.h"
+#include "cgi.h"
 
 // configurable serve directory (set by main via state)
 static const char *g_serve_dir = "public";
 void http_set_serve_dir(const char *d) { g_serve_dir = d ? d : "public"; }
+
+/* Configurable php-cgi command; default to "php-cgi" which is the typical CGI wrapper for PHP.
+    The earlier code used "php -f" which invokes the CLI and doesn't behave exactly like php-cgi.
+    Allow overriding via server CLI. */
+static const char *g_php_cgi_cmd = "php-cgi";
+void http_set_php_cgi(const char *path) { g_php_cgi_cmd = path ? path : "php-cgi"; }
 
 static void url_decode_internal(char *dst, const char *src) {
     char a, b;
@@ -110,11 +117,22 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
     /* Optionally clear timeout (socket will be closed later) */
     char method[16] = {0};
     char url[1024] = {0};
+    char original_url[1024] = {0};
     sscanf(buffer, "%15s %1023s", method, url);
-    char *q = strchr(url, '?'); if (q) *q = '\0';
+    snprintf(original_url, sizeof(original_url), "%s", url);
+    /* separate query string from path so we can decode the path but still pass QUERY_STRING to CGI */
+    char query_string[1024] = "";
+    char path_only[1024]; snprintf(path_only, sizeof(path_only), "%s", url);
+    char *q = strchr(path_only, '?');
+    if (q) {
+        size_t qlen = strlen(q+1);
+        if (qlen >= sizeof(query_string)) qlen = sizeof(query_string)-1;
+        memcpy(query_string, q+1, qlen); query_string[qlen] = '\0';
+        *q = '\0';
+    }
     /* Safe URL decode into bounded buffer */
     char decoded[1024];
-    if (url_decode_n(decoded, sizeof(decoded), url) != 0) {
+    if (url_decode_n(decoded, sizeof(decoded), path_only) != 0) {
         const char *too_long = "HTTP/1.1 414 Request-URI Too Long\r\nConnection: close\r\n\r\n";
         send(client, too_long, (int)strlen(too_long), 0);
         shutdown(client, SD_SEND);
@@ -167,6 +185,36 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
 
     /* use the canonicalized path for file operations */
     strncpy(filepath, fullpath, sizeof(filepath)-1); filepath[sizeof(filepath)-1] = '\0';
+    /* If the path is a directory, try to resolve an index file (index.php then index.html). */
+    {
+        DWORD attrs = GetFileAttributesA(filepath);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            char candidate[MAX_PATH];
+            /* try index.php */
+            snprintf(candidate, sizeof(candidate), "%s\\index.php", filepath);
+            if (GetFileAttributesA(candidate) != INVALID_FILE_ATTRIBUTES) {
+                /* use index.php */
+                strncpy(filepath, candidate, sizeof(filepath)-1); filepath[sizeof(filepath)-1] = '\0';
+                /* adjust decoded (SCRIPT_NAME/PHP_SELF) to include index.php */
+                size_t dl = strlen(decoded);
+                if (dl + 10 < sizeof(decoded)) {
+                    if (dl > 0 && decoded[dl-1] == '/') strncat(decoded, "index.php", sizeof(decoded)-dl-1);
+                    else strncat(decoded, "/index.php", sizeof(decoded)-dl-1);
+                }
+            } else {
+                /* try index.html */
+                snprintf(candidate, sizeof(candidate), "%s\\index.html", filepath);
+                if (GetFileAttributesA(candidate) != INVALID_FILE_ATTRIBUTES) {
+                    strncpy(filepath, candidate, sizeof(filepath)-1); filepath[sizeof(filepath)-1] = '\0';
+                    size_t dl = strlen(decoded);
+                    if (dl + 11 < sizeof(decoded)) {
+                        if (dl > 0 && decoded[dl-1] == '/') strncat(decoded, "index.html", sizeof(decoded)-dl-1);
+                        else strncat(decoded, "/index.html", sizeof(decoded)-dl-1);
+                    }
+                }
+            }
+        }
+    }
     long total_sent = 0; int status = 200;
     char referer_buf[201] = "-"; char ua_buf[201] = "-";
     char *headers_end = strstr(buffer, "\r\n\r\n");
@@ -198,6 +246,210 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
             send(client, body, (int)strlen(body), 0); total_sent += (int)strlen(body);
             status = 200;
         } else {
+            /* If the requested file ends with a dynamic extension, run the associated interpreter via CGI. */
+            const char *ext = strrchr(filepath, '.');
+            if (ext) {
+                ext++;
+                /* map a few common script extensions to interpreter commands. In production make this configurable. */
+                const char *interp = NULL;
+                if (_stricmp(ext, "php") == 0) interp = g_php_cgi_cmd; /* default php-cgi or overridden via --php-cgi */
+                else if (_stricmp(ext, "py") == 0) interp = "python"; /* python script */
+                else if (_stricmp(ext, "pl") == 0) interp = "perl";
+                else if (_stricmp(ext, "rb") == 0) interp = "ruby";
+                if (interp) {
+                    /* Build CGI environment: REQUEST_METHOD, SCRIPT_FILENAME, QUERY_STRING, SERVER_PROTOCOL,
+                       CONTENT_LENGTH (if present), CONTENT_TYPE (if present), REMOTE_ADDR and HTTP_* headers. */
+                    char env_request_method[64];
+                    char env_script[MAX_PATH + 32];
+                    char env_query[1024] = "QUERY_STRING=";
+                    char env_proto[64];
+                    char env_cl[64] = "";
+                    char env_ct[256] = "";
+                    char env_remote[128] = "";
+                    snprintf(env_request_method, sizeof(env_request_method), "REQUEST_METHOD=%s", method);
+                    snprintf(env_script, sizeof(env_script), "SCRIPT_FILENAME=%s", filepath);
+                    /* use extracted query string from earlier */
+                    if (query_string[0]) {
+                        snprintf(env_query + strlen("QUERY_STRING="), sizeof(env_query) - strlen("QUERY_STRING="), "%s", query_string);
+                    }
+                    snprintf(env_proto, sizeof(env_proto), "SERVER_PROTOCOL=HTTP/1.1");
+                    /* CONTENT_LENGTH and CONTENT_TYPE could be parsed from headers; simple scan below */
+                    char content_length_val[64] = "";
+                    char content_type_val[192] = "";
+                    if (headers_end) {
+                        char *ls = strchr(buffer, '\n'); if (ls) ls += 1;
+                        while (ls && ls < headers_end) {
+                            char *le = strstr(ls, "\r\n"); if (!le) break;
+                            size_t llen = (size_t)(le - ls);
+                            if (llen > 0 && llen < 1024) {
+                                char line[1024]; size_t copylen = llen < sizeof(line)-1 ? llen : sizeof(line)-1;
+                                memcpy(line, ls, copylen); line[copylen] = '\0';
+                                if (_strnicmp(line, "Content-Length:", 15) == 0) {
+                                    char *v = line + 15; while (*v == ' ') v++; snprintf(content_length_val, sizeof(content_length_val), "%s", v);
+                                } else if (_strnicmp(line, "Content-Type:", 13) == 0) {
+                                    char *v = line + 13; while (*v == ' ') v++; snprintf(content_type_val, sizeof(content_type_val), "%s", v);
+                                }
+                            }
+                            ls = le + 2;
+                        }
+                    }
+                    if (content_length_val[0]) snprintf(env_cl, sizeof(env_cl), "CONTENT_LENGTH=%s", content_length_val);
+                    if (content_type_val[0]) snprintf(env_ct, sizeof(env_ct), "CONTENT_TYPE=%s", content_type_val);
+                    /* REMOTE_ADDR */
+                    char ipstr[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &addr->sin_addr, ipstr, sizeof(ipstr));
+                    snprintf(env_remote, sizeof(env_remote), "REMOTE_ADDR=%s", ipstr);
+
+                    /* Additional CGI vars */
+                    char env_gateway[] = "GATEWAY_INTERFACE=CGI/1.1";
+                    char env_software[] = "SERVER_SOFTWARE=Cserver/0.1";
+                    char env_script_name[MAX_PATH + 32];
+                    char env_path_translated[MAX_PATH + 32];
+                    char env_php_self[1024];
+                    char env_redirect[] = "REDIRECT_STATUS=200"; /* helpful for php-cgi */
+                    snprintf(env_script_name, sizeof(env_script_name), "SCRIPT_NAME=%s", decoded);
+                    snprintf(env_path_translated, sizeof(env_path_translated), "PATH_TRANSLATED=%s", filepath);
+                    snprintf(env_php_self, sizeof(env_php_self), "PHP_SELF=%s", decoded);
+                    /* SERVER_NAME/PORT: assume localhost:8080 unless the server provides these elsewhere */
+                    char env_server_name[] = "SERVER_NAME=localhost";
+                    char env_server_port[] = "SERVER_PORT=8080";
+                    char env_remote_port[64]; snprintf(env_remote_port, sizeof(env_remote_port), "REMOTE_PORT=%u", ntohs(addr->sin_port));
+
+                    /* Build an env vector, including HTTP_* headers. Limit to a fixed number to keep stack usage bounded. */
+                    const int MAX_ENV = 64;
+                    const int MAX_ENV_STORAGE = 64;
+                    char env_storage[MAX_ENV_STORAGE][512];
+                    const char *envp[MAX_ENV];
+                    int ei = 0;
+                    envp[ei++] = env_request_method;
+                    envp[ei++] = env_script;
+                    envp[ei++] = env_query;
+                    envp[ei++] = env_proto;
+                    if (env_cl[0]) envp[ei++] = env_cl;
+                    if (env_ct[0]) envp[ei++] = env_ct;
+                    envp[ei++] = env_remote;
+                    envp[ei++] = env_gateway;
+                    envp[ei++] = env_software;
+                    envp[ei++] = env_script_name;
+                    envp[ei++] = env_path_translated;
+                    envp[ei++] = env_php_self;
+                    envp[ei++] = env_redirect;
+                    envp[ei++] = env_server_name;
+                    envp[ei++] = env_server_port;
+                    envp[ei++] = env_remote_port;
+
+                    /* Scan headers and append as HTTP_<NAME>=value entries. */
+                    if (headers_end) {
+                        char *ls = strchr(buffer, '\n'); if (ls) ls += 1;
+                        while (ls && ls < headers_end && ei < MAX_ENV-1) {
+                            char *le = strstr(ls, "\r\n"); if (!le) break;
+                            size_t llen = (size_t)(le - ls);
+                            if (llen > 0 && llen < 480) {
+                                char line[512]; size_t copylen = llen < sizeof(line)-1 ? llen : sizeof(line)-1;
+                                memcpy(line, ls, copylen); line[copylen] = '\0';
+                                /* split name:value */
+                                char *colon = strchr(line, ':');
+                                if (colon) {
+                                    *colon = '\0';
+                                    char *name = line; char *val = colon + 1;
+                                    while (*val == ' ') val++;
+                                    /* normalize name: uppercase and dashes -> underscores */
+                                    char nm[256]; size_t ni = 0;
+                                    for (char *p = name; *p && ni + 1 < sizeof(nm); ++p) {
+                                        char c = *p;
+                                        if (c == '-') c = '_';
+                                        nm[ni++] = (char)toupper((unsigned char)c);
+                                    }
+                                    nm[ni] = '\0';
+                                    /* Skip Content-Type and Content-Length since they're added separately */
+                                    if (_stricmp(nm, "CONTENT_TYPE") == 0 || _stricmp(nm, "CONTENT_LENGTH") == 0) {
+                                        /* skip */
+                                    } else {
+                                        /* prefix HTTP_ */
+                                        snprintf(env_storage[ei % MAX_ENV_STORAGE], sizeof(env_storage[0]), "HTTP_%s=%s", nm, val);
+                                        envp[ei] = env_storage[ei % MAX_ENV_STORAGE];
+                                        ei++;
+                                    }
+                                }
+                            }
+                            ls = le + 2;
+                        }
+                    }
+                    envp[ei] = NULL;
+
+                    /* Read request body (if any) and pass to CGI. Enforce a cap to avoid OOMs. */
+                    size_t content_len = 0;
+                    if (content_length_val[0]) content_len = (size_t)strtoul(content_length_val, NULL, 10);
+                    const size_t MAX_BODY = 4 * 1024 * 1024; /* 4 MiB */
+                    if (content_len > MAX_BODY) {
+                        const char *too_big = "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n";
+                        send(client, too_big, (int)strlen(too_big), 0);
+                        shutdown(client, SD_SEND); closesocket(client);
+                        if (out_status) *out_status = 413;
+                        return 0;
+                    }
+
+                    char *body_buf = NULL; size_t body_read = 0;
+                    if (content_len > 0) {
+                        body_buf = (char*)malloc(content_len);
+                        if (!body_buf) {
+                            const char *err500 = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n";
+                            send(client, err500, (int)strlen(err500), 0);
+                            shutdown(client, SD_SEND); closesocket(client);
+                            if (out_status) *out_status = 500;
+                            return 0;
+                        }
+                        /* compute how many body bytes are already in buffer after headers_end */
+                        char *body_start = headers_end + 4; /* skip \r\n\r\n */
+                        int already = (int)(total - (body_start - buffer));
+                        if (already > 0) {
+                            int copy = (int)min((size_t)already, content_len);
+                            memcpy(body_buf, body_start, copy);
+                            body_read = copy;
+                        }
+                        /* read remaining bytes */
+                        while (body_read < content_len) {
+                            int toread = (int)min(content_len - body_read, (size_t)4096);
+                            int r = recv(client, body_buf + body_read, toread, 0);
+                            if (r <= 0) break; /* timeout or error */
+                            body_read += (size_t)r;
+                        }
+                        if (body_read != content_len) {
+                            free(body_buf);
+                            const char *badreq = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+                            send(client, badreq, (int)strlen(badreq), 0);
+                            shutdown(client, SD_SEND); closesocket(client);
+                            if (out_status) *out_status = 400;
+                            return 0;
+                        }
+                    }
+
+                    if (run_cgi_command(client, interp, filepath, envp, body_buf, content_len, &status) == 0) {
+                        if (body_buf) free(body_buf);
+                        /* run_cgi_command streams the response directly. We consider request handled. */
+                        total_sent = 0; /* response already sent */
+                        shutdown(client, SD_SEND); closesocket(client);
+                        if (out_status) *out_status = status;
+                        /* Log entry will be written below by returning early; to avoid double close we return here. */
+                        char ipstr[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &addr->sin_addr, ipstr, sizeof(ipstr));
+                        time_t now = time(NULL); struct tm local_tm;
+#if defined(_MSC_VER) || defined(__MINGW32__)
+                        localtime_s(&local_tm, &now);
+#else
+                        localtime_r(&now, &local_tm);
+#endif
+                        char timestr[64]; strftime(timestr, sizeof(timestr), "%d/%b/%Y:%H:%M:%S", &local_tm);
+                        char request_line[512]; snprintf(request_line, sizeof(request_line), "%s %s", method, url);
+                        log_printf("ACCESS", "%s - - [%s +0000] \"%s HTTP/1.1\" %d %ld \"%s\" \"%s\"", ipstr, timestr, request_line, status, total_sent,
+                                   referer_buf[0] ? referer_buf : "-", ua_buf[0] ? ua_buf : "-");
+                        return 0;
+                    } else {
+                        const char *err500 = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n";
+                        send(client, err500, (int)strlen(err500), 0);
+                        total_sent += (int)strlen(err500);
+                        status = 500;
+                    }
+                }
+            }
             FILE *f = fopen(filepath, "rb");
             if (!f) {
                 const char *notfound = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";

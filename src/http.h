@@ -11,3 +11,6 @@ const char *get_mime_type(const char *path);
 
 // set serve directory
 void http_set_serve_dir(const char *d);
+
+// set path/command for php CGI interpreter (default: "php-cgi")
+void http_set_php_cgi(const char *path);

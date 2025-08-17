@@ -3,8 +3,7 @@
 Minimal, small HTTP server written in C using the Win32/Winsock2 API. It serves static files from a directory and provides a tiny thread pool, access logging (Combined Log Format), and size-based log rotation.
 
 This repository is intended for learning, experimentation, and small internal use-cases. It is not a
-drop-in production web server. See the "Limitations and security" section for recent hardening and
-remaining gaps.
+drop-in production web server.
 
 ## Highlights
 
@@ -13,18 +12,8 @@ remaining gaps.
 - Access logs written in Combined Log Format (CLF) when `--log-file` is used.
 - Size-based log rotation with `--log-rotate-size` and `--log-rotate-count`.
 - Graceful shutdown on Ctrl+C.
-
-## Recent hardening
-
-- Header size limit: request headers are limited to the first 8 KiB of data; if the header terminator `\r\n\r\n` is
-  not received before the buffer fills the server returns `431 Request Header Fields Too Large` and closes the connection.
-- Request-URI decode limit: decoded request paths are bounded to 1024 bytes; if decoding would exceed that the server returns
-  `414 Request-URI Too Long` and closes the connection.
-- Path canonicalization: requested paths are canonicalized (using `_fullpath`) and must reside under the configured serve
-  directory; requests that resolve outside the serve dir return `403 Forbidden`.
-
-These are small, pragmatic protections useful for low-risk deployments. They do not replace a full HTTP/CORS/TLS
-defense-in-depth model.
+- Minimal CGI support for dynamic content (PHP, Python, Perl, Ruby) via per-request processes.
+- PHP works with the `php-cgi` wrapper; supply a custom path with `--php-cgi`.
 
 ## Build
 
@@ -78,6 +67,8 @@ Examples:
 - `--log-file <path>` — append access and internal logs to the provided file.
 - `--log-rotate-size <size>` — enable size-based rotation; examples: `1K`, `10M`, `1G`.
 - `--log-rotate-count <n>` — how many rotated files to keep (default 5).
+- `--php-cgi <path>` — optional: path to a php-cgi executable (or other CGI wrapper) to execute `.php` files; default is
+   `php-cgi` (must be in PATH or an absolute path). When set, `.php` files under the served directory will be executed via CGI.
 
 The server writes access logs in Combined Log Format when `--log-file` is set:
 
@@ -99,6 +90,8 @@ improves resilience, but there are still notable limitations:
 - No rate limiting or per-IP connection limits.
 - Log rotation is simple rename-based; no compression or time-based rotation.
 - No authentication or authorization.
+- CGI is implemented by spawning an interpreter process per-request (CreateProcess). This is simple but not high-performance;
+   for production-scale PHP use a FastCGI backend (php-fpm) and a FastCGI client/proxy in front of it.
 
 If you need production-grade behavior, run this behind a hardened proxy or gateway and add tests + CI.
 
@@ -110,6 +103,7 @@ If you need production-grade behavior, run this behind a hardened proxy or gatew
 - `src/threadpool.c` / `src/threadpool.h` - worker queue and thread pool
 - `src/state.c` / `src/state.h` - shared runtime state (running flag, listen socket)
 - `src/utils.c` / `src/utils.h` - small helpers (parse_size, header sanitization)
+- `src/cgi.c` / `src/cgi.h` - CGI request handling
 - `Makefile` - build helper
 - `README.md` - this file
 

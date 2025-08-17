@@ -15,8 +15,6 @@
 #define DEFAULT_PORT "8080"
 #define BACKLOG 10
 
-// use state module for runtime flags
-
 // Console Ctrl handler for graceful shutdown
 static BOOL WINAPI console_ctrl_handler(DWORD sig) {
     if (sig == CTRL_C_EVENT || sig == CTRL_CLOSE_EVENT || sig == CTRL_BREAK_EVENT) {
@@ -49,6 +47,7 @@ int main(int argc, char **argv) {
     const char *port = DEFAULT_PORT;
     const char *serve_dir = "public";
     const char *log_file = NULL;
+    const char *php_cgi = NULL;
     int workers = 8;
     const char *log_rotate_size_str = NULL;
     int log_rotate_count = 5;
@@ -66,10 +65,12 @@ int main(int argc, char **argv) {
             log_rotate_size_str = argv[++i];
         } else if (strcmp(argv[i], "--log-rotate-count") == 0 && i + 1 < argc) {
             log_rotate_count = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--php-cgi") == 0 && i + 1 < argc) {
+            php_cgi = argv[++i];
         } else if (strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
             workers = atoi(argv[++i]); if (workers <= 0) workers = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [--port PORT] [--serve PATH] [--workers N] [--log-file path]\n", argv[0]);
+            printf("Usage: %s [--port PORT] [--serve PATH] [--workers N] [--log-file path] [--php-cgi \"path\"]\n", argv[0]);
             return 0;
         }
     }
@@ -80,6 +81,7 @@ int main(int argc, char **argv) {
     if (log_rotate_size_str) rotate_size = parse_size(log_rotate_size_str);
     log_init(log_file, rotate_size, log_rotate_count);
     http_set_serve_dir(serve_dir);
+    if (php_cgi) http_set_php_cgi(php_cgi);
     threadpool_init(workers);
 
     struct addrinfo hints; struct addrinfo *result = NULL;
@@ -112,7 +114,9 @@ int main(int argc, char **argv) {
         SOCKET client = accept(listen_sock, (struct sockaddr*)&client_addr, &addrlen);
         if (client == INVALID_SOCKET) {
             int err = WSAGetLastError();
-            if (!state_is_running() && err == WSAENOTSOCK) break;
+            /* When shutting down, closing the listen socket can cause accept to fail with
+               WSAEINTR (10004) or WSAENOTSOCK; treat these as expected and stop looping. */
+            if (!state_is_running() && (err == WSAENOTSOCK || err == WSAEINTR)) break;
             log_printf("WARN", "accept failed: %d", err);
             break;
         }
