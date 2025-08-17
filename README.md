@@ -36,13 +36,13 @@ Or build directly with gcc:
 - Serve `public` on port 8080 with 4 workers and write access logs to `server.log`:
 
 ```powershell
-.\server.exe --port 8080 --serve public --workers 4 --log-file d:\Dev\Cserver\server.log
+.\server.exe --port 8080 --serve public --workers 4 --log-file .\server.log
 ```
 
 - Enable size-based rotation (rotate files at ~10MB, keep 5 rotated files):
 
 ```powershell
-.\server.exe --log-file d:\Dev\Cserver\server.log --log-rotate-size 10M --log-rotate-count 5
+.\server.exe --log-file .\server.log --log-rotate-size 10M --log-rotate-count 5
 ```
 
 ## Notes on flags
@@ -83,5 +83,10 @@ Rotation is size-based (when `--log-rotate-size` is set) and uses the `--log-rot
 ## Files
 
 - `src/server.c` - server implementation
+- `src/http.c` / `src/http.h` - HTTP request parsing and static file serving
+- `src/log.c` / `src/log.h` - centralized logging and rotation
+- `src/threadpool.c` / `src/threadpool.h` - worker queue and thread pool
+- `src/state.c` / `src/state.h` - shared runtime state (running flag, listen socket)
+- `src/utils.c` / `src/utils.h` - small helpers (parse_size, header sanitization)
 - `Makefile` - build helper
 - `README.md` - this file

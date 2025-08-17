@@ -1,13 +1,13 @@
 CC = gcc
 CFLAGS = -O2 -Wall
 LDFLAGS = -lws2_32
-SRC = src/server.c
+SRCS = src/server.c src/http.c src/log.c src/threadpool.c src/state.c src/utils.c
 OUT = server.exe
 
 all: $(OUT)
 
-$(OUT): $(SRC)
-	$(CC) $(CFLAGS) -o $(OUT) $(SRC) $(LDFLAGS)
+$(OUT): $(SRCS)
+	$(CC) $(CFLAGS) -o $(OUT) $(SRCS) $(LDFLAGS)
 
 clean:
 	del /Q $(OUT) || rm -f $(OUT)

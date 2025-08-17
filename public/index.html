@@ -1,14 +1,18 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Test Server</title>
-  <script src="/js/app.js"></script>
+  <link rel="stylesheet" href="/css/app.css">
+  <script defer src="/js/app.js"></script>
 </head>
 <body>
-  <h1>Index</h1>
-  <p>If JS loads, check console.</p>
+  <main class="container">
+    <h1>Index</h1>
+    <p>If JS loads, check console.</p>
 
-  <button onclick="greet()">Greet</button>
+    <button id="greetBtn">Greet</button>
+  </main>
 </body>
 </html>
