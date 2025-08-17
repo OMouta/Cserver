@@ -1,2 +1,32 @@
+# Build directories
+build/
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Binaries and logs
 server.exe
-server.log
+*.exe
+*.dll
+*.so
+*.log
+
+# Object and library files
+*.o
+*.obj
+*.lib
+*.a
+*.pdb
+*.ilk
+
+# IDE/editor folders
+.vs/
+.vscode/
+.idea/
+
+# User/project specific
+*.user
+*.suo

@@ -235,7 +235,8 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
             line_start = line_end + 2;
         }
     }
-    if (strcmp(method, "GET") == 0) {
+    /* accept GET, POST and HEAD for existing handling (POST forwarded to CGI for dynamic files) */
+    if (_stricmp(method, "GET") == 0 || _stricmp(method, "POST") == 0 || _stricmp(method, "HEAD") == 0) {
         if (strcmp(decoded, "/hello") == 0) {
             const char *body = "<html><body><h1>/hello says hi!</h1></body></html>";
             char hdr[512];
@@ -243,7 +244,10 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
                 strlen(body));
             send(client, hdr, hdrlen, 0); total_sent += hdrlen;
-            send(client, body, (int)strlen(body), 0); total_sent += (int)strlen(body);
+            /* don't send body for HEAD requests */
+            if (_stricmp(method, "HEAD") != 0) {
+                send(client, body, (int)strlen(body), 0); total_sent += (int)strlen(body);
+            }
             status = 200;
         } else {
             /* If the requested file ends with a dynamic extension, run the associated interpreter via CGI. */

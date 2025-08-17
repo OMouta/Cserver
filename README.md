@@ -17,46 +17,68 @@ drop-in production web server.
 
 ## Build
 
-You can build this project either from MSYS2 (MinGW) or with a standard Windows toolchain that provides `gcc`.
+You can build this project with MinGW (MSYS2) or using CMake. A `CMakePresets.json` is included with a `mingw` preset.
 
-MSYS2 (MinGW64) recommended steps:
+Recommended (CMake + MinGW):
 
-1. Open "MSYS2 MinGW 64-bit".
-2. Ensure toolchain is installed: pacman -Syu mingw-w64-x86_64-gcc make
-3. Build with make:
+PowerShell / cmd (uses the `MinGW Makefiles` generator):
 
 ```powershell
-make
+cmake --preset mingw      # configure (uses CMakePresets.json)
+cmake --build --preset release
 ```
 
-Or build directly with gcc (PowerShell / MSYS2 shell):
+Or the equivalent manual steps:
 
 ```powershell
-gcc -O2 -Wall -o server.exe src/server.c src/http.c src/log.c src/threadpool.c src/state.c src/utils.c -lws2_32
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build --config Release
 ```
 
-If you use a different compiler or cross-compile, adjust flags accordingly.
+You can also use the provided helper scripts in `scripts/`:
+
+```powershell
+.\scripts\build.ps1   # PowerShell helper (configures once and builds)
+```
+
+If you prefer to compile directly with `gcc` (MSYS2), the project can still be built with a single gcc command, but using CMake is recommended for consistent artifacts.
 
 ## Run
 
-Default: serve `./public` on port 8080:
+When built with CMake the executable is produced under `build/Release` and is named `Cserver.exe` (or `Cserver` on non-Windows generators). The `scripts/` helpers start the built binary and provide presets.
+
+Default (serve `../public` on port 8080 from repo root using the CMake build output):
 
 ```powershell
-.\server.exe
+.\build\Cserver.exe
 ```
 
-Examples:
+Recommended (use the start helpers):
+
+PowerShell:
+
+```powershell
+.\scripts\start.ps1 -WithPhp -WithLogs
+```
+
+cmd.exe:
+
+```bat
+scripts\start.bat /php /logs
+```
+
+Examples (directly invoking the CMake-built executable):
 
 - Serve `public` on port 8080 with 4 workers and write access logs to `server.log`:
 
 ```powershell
-.\server.exe --port 8080 --serve public --workers 4 --log-file .\server.log
+.\build\Cserver.exe --port 8080 --serve public --workers 4 --log-file .\server.log
 ```
 
 - Log rotation: rotate logs at ~10 MB and keep 5 rotated files:
 
 ```powershell
-.\server.exe --log-file .\server.log --log-rotate-size 10M --log-rotate-count 5
+.\build\Cserver.exe --log-file .\server.log --log-rotate-size 10M --log-rotate-count 5
 ```
 
 ## Command-line flags
@@ -106,6 +128,43 @@ If you need production-grade behavior, run this behind a hardened proxy or gatew
 - `src/cgi.c` / `src/cgi.h` - CGI request handling
 - `Makefile` - build helper
 - `README.md` - this file
+
+## Scripts
+
+This repository includes simple helper scripts under the `scripts/` directory to make building and starting the server easier on Windows (MinGW/gcc or cmd/PowerShell).
+
+- `scripts/build.ps1` — PowerShell helper: configures (once) with the `MinGW Makefiles` generator and builds the `Release` target.
+- `scripts/build.bat` — cmd helper with the same behavior.
+- `CMakePresets.json` — contains a `mingw` configure preset and a `release` build preset. You can use `cmake --preset mingw` to configure and `cmake --build --preset release` to build.
+- `scripts/start.ps1` — PowerShell start script with presets: `-WithPhp`, `-WithLogs`, `-Port`, `-ServeDir`, `-PhpCgiPath`, `-LogFile`.
+- `scripts/start.bat` — cmd start script. Flags: `/php` to enable `--php-cgi`, `/logs` to enable `--log-file`.
+
+### Examples
+
+#### PowerShell (build + start with PHP and logs)
+
+```powershell
+# configure/build
+.\scripts\build.ps1
+
+# start with php and logging
+.\scripts\start.ps1 -WithPhp -WithLogs
+```
+
+#### cmd.exe (build + start)
+
+```bat
+scripts\build.bat
+scripts\start.bat /php /logs
+```
+
+The default start command used by the scripts is equivalent to:
+
+```powershell
+.\build\Cserver.exe --serve "public" --port 8080 --php-cgi "D:\IDE's\php-8.4.11-Win32-vs17-x64\php-cgi.exe" --log-file "server.log"
+```
+
+You can override the PHP path, port, and log file via the script parameters.
 
 ## Contributing
 
