@@ -1,18 +1,88 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Test Server</title>
-  <link rel="stylesheet" href="/css/app.css">
-  <script defer src="/js/app.js"></script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cserver — Quick Overview</title>
+  <link rel="stylesheet" href="css/app.css">
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; color:#222; }
+    body { margin: 0; padding: 2rem; background:#f7f9fb; }
+    .wrap { max-width:900px; margin:0 auto; background:#fff; padding:1.6rem; border-radius:8px; box-shadow:0 6px 18px rgba(20,30,40,0.06); }
+    h1 { margin:0 0 0.25rem 0; font-size:1.6rem; }
+    p.lead { margin:0 0 1rem 0; color:#555; }
+    section { margin:1rem 0; }
+    ul { margin:0.4rem 0 0 1.25rem; color:#333; }
+    pre { background:#0b1220; color:#d6e6ff; padding:0.6rem; border-radius:6px; overflow:auto; font-size:0.95rem; }
+    .k { color:#7fb0ff; } /* small highlight class */
+    footer { margin-top:1.25rem; font-size:0.9rem; color:#666; }
+    .btn { display:inline-block; padding:0.45rem 0.7rem; background:#0b78ff; color:#fff; text-decoration:none; border-radius:6px; font-weight:600; }
+  </style>
 </head>
 <body>
-  <main class="container">
-    <h1>Index</h1>
-    <p>If JS loads, check console.</p>
+  <div class="wrap">
+    <header>
+      <h1>Cserver</h1>
+      <p class="lead">A minimal Win32 HTTP server (MSYS2 / MinGW) — serves static files, small thread pool, basic CGI & simple log rotation.</p>
+      <nav style="margin-top:0.6rem;"><a href="/docs" style="color:#0b78ff;text-decoration:none;">Docs</a></nav>
+    </header>
 
-    <button id="greetBtn">Greet</button>
-  </main>
+    <section>
+      <h2>Highlights</h2>
+      <ul>
+        <li>Serve a directory of static files (default <code>public</code>).</li>
+        <li>Small configurable thread pool.</li>
+        <li>Access logs in Combined Log Format with size-based rotation.</li>
+        <li>Basic per-request CGI support (php-cgi or other interpreters).</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Quick build (CMake + MinGW)</h2>
+      <pre>
+cmake --preset mingw
+cmake --build --preset release</pre>
+    </section>
+
+    <section>
+      <h2>Run examples</h2>
+      <p>Default (serve <code>public</code> on port 8080):</p>
+      <pre>
+.\build\Cserver.exe</pre>
+
+      <p>Serve with logs and 4 workers:</p>
+      <pre>
+.\build\Cserver.exe --port 8080 --serve public --workers 4 --log-file .\server.log</pre>
+
+      <p>Rotate logs at ~10 MB, keep 5 files:</p>
+      <pre>
+.\build\Cserver.exe --log-file .\server.log --log-rotate-size 10M --log-rotate-count 5</pre>
+    </section>
+
+    <section>
+      <h2>Common flags</h2>
+      <ul>
+        <li><code>--port &lt;port&gt;</code> — listen port (default 8080)</li>
+        <li><code>--serve &lt;path&gt;</code> — directory to serve (default <code>public</code>)</li>
+        <li><code>--workers &lt;N&gt;</code> — number of worker threads (default 8)</li>
+        <li><code>--log-file &lt;path&gt;</code>, <code>--log-rotate-size &lt;size&gt;</code>, <code>--log-rotate-count &lt;n&gt;</code></li>
+        <li><code>--php-cgi &lt;path&gt;</code> — path to php-cgi to enable executing <code>.php</code> files</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Notes & limitations</h2>
+      <ul>
+        <li>No TLS — put behind a reverse proxy for production.</li>
+        <li>Minimal HTTP parsing and CGI is per-request process (simple, not high-performance).</li>
+        <li>Log rotation is rename-based; no compression or time-based features.</li>
+      </ul>
+    </section>
+
+    <footer>
+      <div>License: MIT</div>
+      <div style="margin-top:0.6rem;"><a class="btn" href="/docs">View docs</a></div>
+    </footer>
+  </div>
 </body>
 </html>

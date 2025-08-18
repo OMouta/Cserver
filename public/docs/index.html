@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cserver — Docs</title>
+  <link rel="stylesheet" href="../css/app.css">
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; color:#222; }
+    body { margin: 0; padding: 2rem; background:#f7f9fb; }
+    .wrap { max-width:980px; margin:0 auto; background:#fff; padding:1.6rem; border-radius:8px; box-shadow:0 6px 18px rgba(20,30,40,0.06); }
+    h1 { margin:0 0 0.25rem 0; font-size:1.6rem; }
+    p.lead { margin:0 0 1rem 0; color:#555; }
+    section { margin:1rem 0; }
+    ul { margin:0.4rem 0 0 1.25rem; color:#333; }
+    pre { background:#0b1220; color:#d6e6ff; padding:0.6rem; border-radius:6px; overflow:auto; font-size:0.95rem; }
+    footer { margin-top:1.25rem; font-size:0.9rem; color:#666; }
+    .meta { font-size:0.9rem; color:#555; margin-bottom:0.6rem; }
+    .btn { display:inline-block; padding:0.45rem 0.7rem; background:#0b78ff; color:#fff; text-decoration:none; border-radius:6px; font-weight:600; }
+    nav a { margin-right:0.6rem; color:#0b78ff; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Cserver — Documentation</h1>
+      <p class="lead">Minimal Win32 HTTP server — static file serving, small thread-pool, basic CGI and simple log rotation.</p>
+      <nav class="meta"><a href="/">Home</a> <a href="/docs">Docs</a> <a href="/">Public</a></nav>
+    </header>
+
+    <section>
+      <h2>Docs index</h2>
+      <p>Quick links to focused documentation pages:</p>
+      <ul>
+        <li><a href="#build">Build</a> — how to build the project (CMake + MinGW, scripts).</li>
+        <li><a href="#run">Run</a> — how to run the server and example commands.</li>
+        <li><a href="#flags">Flags</a> — command-line flags and meanings.</li>
+        <li><a href="#logging">Logging</a> — log format and examples.</li>
+        <li><a href="#limitations">Limitations & security notes</a> — important considerations.</li>
+        <li><a href="#files">Files of interest</a> — key source files and their roles.</li>
+        <li><a href="#scripts">Scripts</a> — helper scripts for building and running.</li>
+        <li><a href="#contributing">Contributing</a> — how to contribute to the project.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Build</h2>
+      <a name="build"></a>
+      <p>The project builds with CMake (recommended) or directly with gcc/MSYS2. A `CMakePresets.json` includes a `mingw` preset.</p>
+      <p>Recommended (CMake + MinGW):</p>
+      <pre>
+cmake --preset mingw
+cmake --build --preset release
+</pre>
+      <p>Or manually:</p>
+      <pre>
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build --config Release
+</pre>
+      <p>PowerShell helper:</p>
+      <pre>
+.\scripts\build.ps1
+</pre>
+    </section>
+
+    <section>
+      <h2>Run</h2>
+      <a name="run"></a>
+      <p>After building the executable will live under <code>build\</code> (named <code>Cserver.exe</code> when built on Windows).</p>
+      <pre>
+.\build\Cserver.exe
+</pre>
+      <p>Examples:</p>
+      <pre>
+.\build\Cserver.exe --port 8080 --serve public --workers 4 --log-file .\server.log
+.\build\Cserver.exe --log-file .\server.log --log-rotate-size 10M --log-rotate-count 5
+</pre>
+    </section>
+
+    <section>
+      <h2>Command-line flags</h2>
+      <a name="flags"></a>
+      <ul>
+        <li><code>--port &lt;port&gt;</code> — TCP port to listen on (default 8080).</li>
+        <li><code>--serve &lt;path&gt;</code> — directory to serve (default <code>public</code>); <code>--public</code> also accepted.</li>
+        <li><code>--workers &lt;N&gt;</code> — number of worker threads (default 8).</li>
+        <li><code>--log-file &lt;path&gt;</code> — append access and internal logs to the provided file.</li>
+        <li><code>--log-rotate-size &lt;size&gt;</code> — enable size-based rotation; examples: <code>1K</code>, <code>10M</code>, <code>1G</code>.</li>
+        <li><code>--log-rotate-count &lt;n&gt;</code> — how many rotated files to keep (default 5).</li>
+        <li><code>--php-cgi &lt;path&gt;</code> — path to a php-cgi executable to execute <code>.php</code> files (default <code>php-cgi</code>).</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Logging (Combined Log Format)</h2>
+      <a name="logging"></a>
+      <p>When <code>--log-file</code> is used access logs are written in Combined Log Format (CLF):</p>
+      <pre>
+%h %l %u [%t] "%r" %>s %b "%{Referer}i" "%{User-agent}i"
+</pre>
+      <p>Example:</p>
+      <pre>
+127.0.0.1 - - [17/Aug/2025:00:35:10 +0000] "GET /index.html HTTP/1.1" 200 1024 "-" "curl/7.68.0"
+</pre>
+    </section>
+
+    <section>
+      <h2>Limitations & security notes</h2>
+      <a name="limitations"></a>
+      <ul>
+        <li>No TLS — use a reverse proxy (nginx, Caddy) or TLS-terminating load balancer for production.</li>
+        <li>Minimal HTTP parsing; only basic GET is implemented and many headers/edge-cases are not fully RFC-compliant.</li>
+        <li>No rate limiting or per-IP connection limits.</li>
+        <li>Log rotation is simple rename-based; no compression or time-based rotation.</li>
+        <li>CGI spawns an interpreter process per-request (CreateProcess). For production PHP use a FastCGI backend.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Files of interest</h2>
+      <ul>
+        <li><code>src/server.c</code> — server entrypoint and argument parsing</li>
+        <li><code>src/http.c</code> / <code>src/http.h</code> — HTTP parsing & static file serving</li>
+        <li><code>src/log.c</code> / <code>src/log.h</code> — logging and rotation</li>
+        <li><code>src/threadpool.c</code> / <code>src/threadpool.h</code> — worker queue and threads</li>
+        <li><code>src/cgi.c</code> / <code>src/cgi.h</code> — CGI handling</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Scripts</h2>
+      <a name="scripts"></a>
+      <p>Helper scripts for Windows are provided under <code>scripts/</code>:</p>
+      <ul>
+        <li><code>scripts/build.ps1</code> — PowerShell helper to configure and build with CMake.</li>
+        <li><code>scripts/start.ps1</code> — PowerShell helper to start the built binary with convenient presets (flags: <code>-WithPhp</code>, <code>-WithLogs</code>, etc.).</li>
+        <li>Equivalent <code>.bat</code> helpers are also present for cmd.exe.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Contributing</h2>
+      <a name="contributing"></a>
+      <p>Small patches, tests and docs improvements are welcome. If you change public behavior please add tests demonstrating the behavior.</p>
+    </section>
+
+    <footer>
+      <div>License: MIT</div>
+      <div style="margin-top:0.6rem;"><a class="btn" href="/">Back to site</a></div>
+    </footer>
+  </div>
+</body>
+</html>
