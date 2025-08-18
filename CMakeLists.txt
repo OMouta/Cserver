@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 project(Cserver C)
 
 set(CMAKE_C_STANDARD 11)
@@ -23,7 +23,7 @@ set(SRCS
 add_executable(Cserver ${SRCS})
 
 if (WIN32)
-    target_link_libraries(Cserver PRIVATE ws2_32)
+    target_link_libraries(Cserver PRIVATE ws2_32 mswsock)
 endif()
 
 install(TARGETS Cserver DESTINATION bin)

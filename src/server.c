@@ -99,7 +99,12 @@ int main(int argc, char **argv) {
         log_printf("ERROR", "socket failed: %d", WSAGetLastError());
         freeaddrinfo(result); WSACleanup(); return 1;
     }
-    BOOL opt = TRUE; setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+     /* Prefer exclusive address use on Windows to avoid other processes binding the same port.
+         Fall back to previous behavior if unavailable. */
+     BOOL opt = TRUE;
+     setsockopt(listen_sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&opt, sizeof(opt));
+     /* Also set SO_REUSEADDR for compatibility with environments that rely on it. */
+     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
     rv = bind(listen_sock, result->ai_addr, (int)result->ai_addrlen);
     if (rv == SOCKET_ERROR) { log_printf("ERROR", "bind failed: %d", WSAGetLastError()); closesocket(listen_sock); freeaddrinfo(result); WSACleanup(); return 1; }
     freeaddrinfo(result);

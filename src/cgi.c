@@ -86,10 +86,30 @@ int run_cgi_command(SOCKET client, const char *interpreter_cmd, const char *scri
             child_cwd[dlen] = '\0';
         }
     }
-    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, envblock, child_cwd[0] ? child_cwd : NULL, &si, &pi)) goto err2;
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, CREATE_SUSPENDED, envblock, child_cwd[0] ? child_cwd : NULL, &si, &pi)) goto err2;
 
     CloseHandle(hChildStdoutWr);
     CloseHandle(hChildStdinRd);
+
+    /* Create a Job object to ensure we can terminate the process tree if it misbehaves. */
+    HANDLE hJob = CreateJobObjectA(NULL, NULL);
+    if (hJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+        ZeroMemory(&jeli, sizeof(jeli));
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+        if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
+            log_printf("WARN", "AssignProcessToJobObject failed for %s (err=%lu)", script_path, GetLastError());
+            CloseHandle(hJob); hJob = NULL;
+        } else {
+            log_printf("DEBUG", "Created job object and assigned process for %s", script_path);
+        }
+    } else {
+        log_printf("DEBUG", "CreateJobObjectA returned NULL for %s (err=%lu)", script_path, GetLastError());
+    }
+
+    /* Resume the suspended child now that it's assigned to the job. */
+    ResumeThread(pi.hThread);
 
     // Write body then close stdin
     if (body_len > 0 && body != NULL) {
@@ -161,12 +181,28 @@ int run_cgi_command(SOCKET client, const char *interpreter_cmd, const char *scri
         }
     }
 
-    WaitForSingleObject(pi.hProcess, 5000);
+    /* Wait for process to finish, but enforce a timeout to avoid blocking workers indefinitely. */
+    const DWORD CGI_TIMEOUT_MS = 5000; /* 5s default */
+    DWORD waitRes = WaitForSingleObject(pi.hProcess, CGI_TIMEOUT_MS);
     DWORD exitCode = 0;
-    if (GetExitCodeProcess(pi.hProcess, &exitCode)) if (out_status) *out_status = (int)exitCode;
+    if (waitRes == WAIT_TIMEOUT) {
+        /* Timeout: terminate job (kills child and children) and mark as error. */
+        log_printf("WARN", "CGI timeout after %u ms for interpreter='%s' script='%s' pid=%lu", CGI_TIMEOUT_MS, interpreter_cmd, script_path, (unsigned long)GetProcessId(pi.hProcess));
+        if (hJob) {
+            if (!TerminateJobObject(hJob, 1)) log_printf("ERROR", "TerminateJobObject failed (err=%lu)", GetLastError());
+            else log_printf("INFO", "Terminated job object for script='%s'", script_path);
+        } else {
+            if (!TerminateProcess(pi.hProcess, 1)) log_printf("ERROR", "TerminateProcess failed (err=%lu)", GetLastError());
+            else log_printf("INFO", "Terminated process for script='%s'", script_path);
+        }
+        if (out_status) *out_status = 504; /* gateway timeout-ish */
+    } else {
+        if (GetExitCodeProcess(pi.hProcess, &exitCode)) if (out_status) *out_status = (int)exitCode;
+    }
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    if (hJob) CloseHandle(hJob);
     CloseHandle(hChildStdoutRd);
     if (envblock) free(envblock);
     return 0;

@@ -2,12 +2,14 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <io.h>
 #include "http.h"
 #include "log.h"
 #include "utils.h"
@@ -92,7 +94,10 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
     }
 
-    /* Read until end of headers (\r\n\r\n) or buffer full. */
+    /* Read until end of headers (\r\n\r\n) or buffer full. Enforce limits to mitigate header DoS. */
+    const int MAX_HEADER_LINES = 256;
+    const int MAX_HEADER_LINE_LEN = 1024;
+    int header_lines = 0;
     while (total < (int)sizeof(buffer) - 1) {
         received = recv(client, buffer + total, (int)sizeof(buffer) - 1 - total, 0);
         if (received <= 0) {
@@ -102,11 +107,31 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
         }
         total += received;
         buffer[total] = '\0';
-        if (strstr(buffer, "\r\n\r\n") != NULL) break;
+        /* Scan newly-read data for newline to count header lines and detect end of headers. */
+        char *p = buffer; char *endp = buffer + total;
+        while (p < endp) {
+            char *nl = memchr(p, '\n', (size_t)(endp - p));
+            if (!nl) break;
+            size_t linelen = (size_t)(nl - p);
+            if (linelen > 0 && p[linelen-1] == '\r') linelen--;
+            header_lines++;
+            if (header_lines > MAX_HEADER_LINES || linelen > MAX_HEADER_LINE_LEN) {
+                const char *too_large = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n";
+                send(client, too_large, (int)strlen(too_large), 0);
+                shutdown(client, SD_SEND);
+                closesocket(client);
+                if (out_status) *out_status = 431;
+                return 0;
+            }
+            if (linelen == 0) { /* blank line -> end of headers */
+                goto headers_done;
+            }
+            p = nl + 1;
+        }
         /* continue reading until headers end or buffer limit */
     }
     /* If we exited the loop without finding headers terminator, treat as too large */
-    if (strstr(buffer, "\r\n\r\n") == NULL) {
+    {
         const char *too_large = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n";
         send(client, too_large, (int)strlen(too_large), 0);
         shutdown(client, SD_SEND);
@@ -114,6 +139,7 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
         if (out_status) *out_status = 431;
         return 0;
     }
+headers_done:;
     /* Optionally clear timeout (socket will be closed later) */
     char method[16] = {0};
     char url[1024] = {0};
@@ -506,11 +532,27 @@ long handle_client(SOCKET client, const struct sockaddr_in *addr, int *out_statu
                     "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\nConnection: close\r\n\r\n",
                     mime, fsize);
                 send(client, hdr, hdrlen, 0); total_sent += hdrlen;
-                char filebuf[8192]; size_t r;
-                while ((r = fread(filebuf, 1, sizeof(filebuf), f)) > 0) {
-                    int sent = send(client, filebuf, (int)r, 0);
-                    if (sent == SOCKET_ERROR) break;
-                    total_sent += sent;
+                /* Try TransmitFile for better performance; fall back to fread/send */
+                int transmitted = 0;
+                {
+                    int fd = _fileno(f);
+                    if (fd != -1) {
+                        HANDLE fh = (HANDLE)_get_osfhandle(fd);
+                        if (fh != INVALID_HANDLE_VALUE) {
+                            /* TransmitFile returns nonzero on success */
+                            if (TransmitFile((SOCKET)client, fh, (DWORD)fsize, 0, NULL, NULL, 0)) {
+                                transmitted = 1;
+                            }
+                        }
+                    }
+                }
+                if (!transmitted) {
+                    char filebuf[8192]; size_t r;
+                    while ((r = fread(filebuf, 1, sizeof(filebuf), f)) > 0) {
+                        int sent = send(client, filebuf, (int)r, 0);
+                        if (sent == SOCKET_ERROR) break;
+                        total_sent += sent;
+                    }
                 }
                 fclose(f);
                 status = 200;

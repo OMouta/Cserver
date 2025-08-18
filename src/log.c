@@ -15,6 +15,7 @@ static int g_log_inited = 0; /* guard whether g_log_lock was initialized */
 static char g_log_path[MAX_PATH] = "";
 static unsigned long long g_log_rotate_size = 0;
 static int g_log_rotate_count = 0;
+static unsigned long long g_log_bytes = 0ULL; /* cached current log file size */
 
 
 static void rotate_logs_locked(void) {
@@ -54,6 +55,12 @@ void log_init(const char *path, unsigned long long rotate_size, int rotate_count
             if (!g_log_file) {
                 fprintf(stderr, "Failed to open log file '%s'\n", path);
             }
+            /* Initialize cached size from existing file on disk to avoid stat on each write. */
+            if (g_log_file) {
+                struct _stat st;
+                if (0 == _stat(g_log_path, &st)) g_log_bytes = (unsigned long long)st.st_size;
+                else g_log_bytes = 0ULL;
+            }
         }
     }
     g_log_rotate_size = rotate_size;
@@ -80,21 +87,31 @@ void log_printf(const char *level, const char *fmt, ...) {
 
     if (g_log_file) {
         EnterCriticalSection(&g_log_lock);
-        if (g_log_rotate_size > 0) {
-            struct _stat st;
-            if (0 == _stat(g_log_path, &st)) {
-                if ((unsigned long long)st.st_size >= g_log_rotate_size) {
-                    rotate_logs_locked();
-                }
-            }
-        }
-        fprintf(g_log_file, "[%s] %s: ", timestr, level);
+        /* Write pieces and measure bytes written to update cached size. */
+        int wrote = 0;
+        int a = fprintf(g_log_file, "[%s] %s: ", timestr, level);
         va_list ap2;
         va_start(ap2, fmt);
-        vfprintf(g_log_file, fmt, ap2);
+        int b = vfprintf(g_log_file, fmt, ap2);
         va_end(ap2);
-        fprintf(g_log_file, "\n");
+        int c = fprintf(g_log_file, "\n");
         fflush(g_log_file);
+        if (a > 0) wrote += a;
+        if (b > 0) wrote += b;
+        if (c > 0) wrote += c;
+        if (wrote > 0) g_log_bytes += (unsigned long long)wrote;
+        /* Rotate only when cached size exceeds threshold to avoid costly stats. */
+        if (g_log_rotate_size > 0 && g_log_bytes >= g_log_rotate_size) {
+            rotate_logs_locked();
+            /* after rotation, reset cached size by stat of the reopened file */
+            if (g_log_file) {
+                struct _stat st;
+                if (0 == _stat(g_log_path, &st)) g_log_bytes = (unsigned long long)st.st_size;
+                else g_log_bytes = 0ULL;
+            } else {
+                g_log_bytes = 0ULL;
+            }
+        }
         LeaveCriticalSection(&g_log_lock);
     }
 }
